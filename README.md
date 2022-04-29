@@ -1,5 +1,7 @@
 # mindset_semantic_segmentation
 Semantic Segmentation<br />
+model: U-net<br />
+dataset: DUTS<br />
 Results<br />
 image-ground_truth-prediction
 ![image](https://user-images.githubusercontent.com/91471603/165999965-52d6a1e5-e109-45d5-86ac-2c4baacf4188.png)
