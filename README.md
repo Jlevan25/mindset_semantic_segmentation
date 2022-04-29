@@ -1,0 +1,2 @@
+# mindset_semantic_segmentation
+Semantic Segmentation
