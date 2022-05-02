@@ -1,16 +1,13 @@
 import os.path
-import pickle
 
 import cv2
 import numpy as np
 import math
 import torch
 from PIL import Image
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 import models
-import matplotlib.pyplot as plt
-
-from torch import nn
 from torch import optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
@@ -37,6 +34,7 @@ class Trainer:
             self.model.cuda()
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.cfg.lr)
+        self.scheduler = ReduceLROnPlateau(self.optimizer, **self.cfg.scheduler_kwargs)
         self.criterion = SegmentationCrossEntropy()
         self.metrics = metrics
         self.transform = transform
@@ -45,8 +43,10 @@ class Trainer:
         self.writer = writer
 
         self.datasets, self.dataloaders = dict(), dict()
+        self._global_step = dict()
 
     def _get_data(self, data_type):
+        self._global_step[data_type] = -1
         transform = self.transform[data_type] if self.transform is not None else None
         target_transform = self.target_transform[data_type] if self.target_transform is not None else None
 
@@ -86,9 +86,10 @@ class Trainer:
             metric_name = type(metric).__name__
 
             for cls, scalar in (zip(self.classes, values) if hasattr(self, 'classes') else enumerate(values)):
-                self.writer.add_scalar(f'{stage}/{metric_name}/{cls}', scalar)
+                self.writer.add_scalar(f'{stage}/{metric_name}/{cls}', scalar, self._global_step[stage])
 
-            self.writer.add_scalar(f'{stage}/{metric_name}/overall', sum(values) / len(values))
+            self.writer.add_scalar(f'{stage}/{metric_name}/overall',
+                                   sum(values) / len(values), self._global_step[stage])
 
             if debug:
                 print("{}: {}".format(metric_name, values))
@@ -104,25 +105,32 @@ class Trainer:
 
         for i, (images, targets) in enumerate(self.dataloaders[stage]):
 
+            self._global_step[stage] += 1
             debug = self.cfg.debug and i % self.cfg.show_each == 0
 
             if debug:
                 print('\n___', f'Iteration {i}', '___')
 
-            masks = self.model(images.to(self.device))
-            one_hots = F.one_hot(targets.long(),
+            one_hots = F.one_hot(targets.round().long(),
                                  num_classes=self.cfg.model_params.out_channels).transpose(1, -1).squeeze(-1)
+
+            # for i, kernel in enumerate(one_hots):
+            #     cv2.imshow(f'target{i}', kernel[1, None].permute(1, 2, 0).numpy().astype('uint8') * 255)
+            # cv2.waitKey()
+
+            masks = self.model(images.to(self.device))
 
             if calc_metrics:
                 self._calc_batch_metrics(masks, one_hots, stage, debug)
 
             if stage == 'train':
                 loss = self.criterion(masks, one_hots.float())
-                self.writer.add_scalar(f'{stage}/loss', loss.data)
+                self.writer.add_scalar(f'{stage}/loss', loss, self._global_step[stage])
 
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
+                self.scheduler.step(loss.detach())
 
                 if debug:
                     print(f'Train Loss: {loss.item()}')
@@ -147,17 +155,6 @@ class Trainer:
         images = images if isinstance(images, list) else [images]
         masks = [self.get_mask(img) for img in images]
 
-        x = int(math.sqrt(len(masks)))
-        fig_size = (x, math.ceil(len(masks) / x))
-
-        image = transforms_F.to_tensor(images[0])
-        masked = image * masks[0]
-        mask = masks[0].numpy().astype('uint8') * 255
-
-        cv2.imshow('mask', mask)
-        cv2.imshow('img', image.permute(1, 2, 0).numpy())
-        cv2.imshow('masked', masked.permute(1, 2, 0).numpy())
-        cv2.waitKey()
         return masks
 
     @torch.no_grad()
@@ -209,8 +206,7 @@ def main():
                              # transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              #                      std=[0.229, 0.224, 0.225]),
 
-
-                             #DUTS
+                             # DUTS
                              transforms.Normalize(mean=[0.4924, 0.4633, 0.3969],
                                                   std=[0.2264, 0.2237, 0.2289]),
                              MosaicSplit(kernel_size=trainer_cfg.model_params.input_shape,
@@ -235,18 +231,28 @@ def main():
                       target_transform=dict(train=target_preprocess, val=target_preprocess, test=target_preprocess))
 
     # get mask from image
-    # img_path = os.path.join(trainer_cfg.DATASET_PATH, 'train', 'images')
+    img_path = os.path.join(trainer_cfg.DATASET_PATH, 'train', 'images')
+    target_path = os.path.join(trainer_cfg.DATASET_PATH, 'train', 'masks')
+    trainer.load_model(trainer_cfg.LOAD_PATH)
+    show_img = None
+    for i in range(6):
+        masks = trainer.get_masks(Image.open(os.path.join(img_path, os.listdir(img_path)[i])).convert("RGB"))
+
+        img = cv2.imread(os.path.join(img_path, os.listdir(img_path)[i]))
+        target = cv2.imread(os.path.join(target_path, os.listdir(target_path)[i]))
+        concat_img = np.concatenate((img, target,
+                                     masks[0].numpy()[..., None].repeat(3, axis=-1).astype('uint8') * 255), axis=1)
+        cv2.imwrite(f'img_target_prediction{i}.jpg', concat_img)
+
     # trainer.load_model(trainer_cfg.LOAD_PATH)
-    # for i in range(6):
-    #     run_img = Image.open(os.path.join(img_path, os.listdir(img_path)[i])).convert("RGB")
-    #     trainer.get_masks(run_img)
-
-    for epoch in range(cfg.epochs):
-        trainer.fit(epoch)
-        trainer.save_model(epoch)
-        # trainer.validation(epoch)
-
-    trainer.test()
+    # for epoch in range(cfg.epochs):
+    #     trainer.fit(epoch)
+    #     trainer.save_model(epoch)
+    #
+    #     trainer.writer.add_scalar(f'scheduler lr', trainer.optimizer.param_groups[0]['lr'], epoch)
+    #     # trainer.validation(epoch)
+    #
+    # trainer.test()
 
 
 if __name__ == '__main__':
