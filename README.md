@@ -1,4 +1,4 @@
-# mindset_semantic_segmentation
+# semantic_segmentation
 Semantic Segmentation<br />
 model: U-net<br />
 dataset: DUTS<br />
